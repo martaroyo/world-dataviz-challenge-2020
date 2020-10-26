@@ -1,0 +1,1333 @@
+---
+title: "World Data Viz Challenge Barcelona-Kobe 2020"
+author: "Marta Royo-Llonch"
+date: "10/26/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, message =F, error =F, warning = FALSE)
+setwd("~/Dropbox/BCN_open_data_2020/github/")
+```
+
+```{r}
+library(tidyverse)
+library(sf)
+library(proj4)
+library(spDataLarge)
+library(raster)
+library(osmdata)
+library(hrbrthemes)
+library(patchwork)
+library(ggnewscale)
+library(colormap)
+library(reshape2)
+library(rgdal)
+```
+
+This file contains the code used for to generate the dataviz infography presentend in the World Data Viz Challenge Barcelona-Kobe 2020, named "Acoustic vulnerability of schools in Barcelona".  
+
+# Barcelona streetmap
+
+I have followd the tutorial by [estebanmoro.org](http://estebanmoro.org/post/2020-10-19-personal-art-map-with-r/) on plotting OSMdata in R.
+
+Definition of the the area where we are going to query OSM:
+
+```{r}
+bbx <- getbb("Barcelona")
+bbx_long <- bbx %>%
+                melt()%>%
+                mutate(code=paste(Var1,Var2,sep="_"))
+```
+
+Let's collect data from Barcelona's highways, streets and rivers:
+
+```{r}
+highways <- bbx %>%
+  opq()%>%
+  add_osm_feature(key = "highway", 
+                  value=c("motorway", "trunk",
+                          "primary","secondary", 
+                          "tertiary","motorway_link",
+                          "trunk_link","primary_link",
+                          "secondary_link",
+                          "tertiary_link")) %>%
+  osmdata_sf()
+
+streets <- bbx %>%
+  opq()%>%
+  add_osm_feature(key = "highway", 
+                  value = c("residential", "living_street",
+                            "service","unclassified",
+                            "pedestrian", "footway")) %>%
+  osmdata_sf()
+
+river <- bbx%>%
+  opq()%>%
+  add_osm_feature(key = "waterway", value = "river") %>%
+  osmdata_sf()
+```  
+
+## Neighborhood mapping  
+
+I have downloaded the official shapefiles for the city of Barcelona from [martgnz](https://github.com/martgnz/bcn-geodata.git)'s github. For convenience, I have eliminated all accents and catalan characters that could mess up the data processing. That is the reason why some input files contain the code `noaccents`in their filename. Original files are also provided in the `data/` .  
+
+```{r}
+barris <- st_read("../data/0301040100_Barris_ADM_ETRS89.shp")
+```
+
+Now I want to merge information on districts so that coloring is made easier. I am using OpenDataBCN's file on neighborhood surface, modifying accents and catalan characters in app `TextEdit`:  
+
+```{r}
+districte <- read.csv("../data/2019_superficie_noaccents.csv")
+barris.df <- barris %>%
+                        rename(Codi_Barri=BARRI)%>%
+                        mutate(Codi_Barri=as.numeric(Codi_Barri))%>%
+                        left_join(districte,by="Codi_Barri")%>%
+                        rownames_to_column(var="rowname")%>%
+                        mutate(rowname=as.numeric(rowname))
+```
+
+This dataframe contains all info on neighborhoods and districts plus maximum coordinates per neighborhood so that we can plot individual districts or neighborhoods in the following step:
+
+```{r}
+barris.df.2 <- as.data.frame(st_coordinates(barris.df$geometry))%>%
+        group_by(L3)%>%
+        summarise(min_x=min(X),
+                  min_y=min(Y),
+                  max_x=max(X),
+                  max_y=max(Y))%>%
+        as.data.frame()%>%
+        mutate(rowname=L3)%>%
+        left_join(barris.df,
+                  by="rowname")
+```
+
+Let's plot the city's districts:  
+
+```{r}
+dist.cols <- c("Ciutat Vella"="#3a506b",
+              "Eixample"="#B5E7E9",
+              "Gracia"="#9b90b6",
+              "Horta-Guinardo"="#f0a587",
+              "Les Corts"="#fd9b9f",  
+              "Nou Barris"="#A6C9FC",
+              "Sant Andreu"="#6e65f6",
+              "Sant Marti"="#FDF6C0",
+              "Sants-Montjuic"="#64B1C6",
+              "Sarria-Sant Gervasi"="#d2f4b8")
+ggplot()+
+          geom_sf(data = streets$osm_lines,
+                  col = "#bbb4b6",
+                  size = .1,
+                  alpha = .5) +
+          geom_sf(data = highways$osm_lines,
+                  col = "#bbb4b6",
+                  size = .3,
+                  alpha = .5)+
+          geom_sf(data = river$osm_lines,
+                  inherit.aes = FALSE,
+                  color = "#4adbc8",
+                  size = 1.4,
+                  alpha = .5) +
+          geom_sf(data=barris.df,
+                  aes(fill=factor(Nom_Districte),
+                      col=factor(Nom_Districte)),
+                  alpha=0.8,size=0.25)+
+          coord_sf(xlim = c(2.052498,2.228356),
+                    ylim = c(41.317035,41.47),
+                  expand = FALSE)+
+        theme_ipsum_rc(grid = F)+
+        scale_fill_manual("Districte:",values=dist.cols)+
+        scale_color_manual("Districte:",values=dist.cols)+
+        theme(axis.text.x = element_blank(),
+              axis.text.y = element_blank(),
+              axis.title.x =element_blank(),
+              axis.title.y = element_blank())
+```
+
+
+## Child's education points  
+
+Let's load data on child's education centers:
+
+```{r}
+edu <- read.csv("../data/E0001_Ensenyament_Infantil_noaccents.csv")%>%
+        dplyr::select(CODI_EQUIPAMENT,EQUIPAMENT,NUM_BARRI,NOM_DISTRICTE,
+               LATITUD,LONGITUD,X_ED50,Y_ED50)
+
+#equipments per district
+n.edu.dist <-  edu %>% 
+                        dplyr::select(CODI_EQUIPAMENT,NOM_DISTRICTE)%>%
+                        distinct()%>%
+                        group_by(NOM_DISTRICTE)%>%
+                        summarise(equi.districte=n())
+```
+
+## Acoustic contamination  
+
+Let's load data with coustic contaminatino info:
+
+```{r}
+sf <- sf::st_read("../data/2017_tramer_mapa_estrategic_soroll_bcn.gpkg", quiet = T)
+df <- as.data.frame(sf::st_coordinates(sf))%>%
+                        rownames_to_column(var="ID")
+
+#create a simple table only with x and y coordinates to correctly transform in the following step
+#we name it x and y
+df.2 <- df %>%
+                dplyr::select(X,Y)%>%
+                rename(x=X,y=Y)
+```
+
+Now we convert UTM to geographical coordinate system using `proj4` and looking for correct transformation settings in [epsg.io](https://epsg.io/transform#s_srs=3857&t_srs=4326)'s website, tab `Transform`. We know that we have UTM31 ED50 as input and want WGS84 as output:  
+
+```{r}
+proj4string <- "+proj=utm +zone=31 +ellps=intl +towgs84=-87,-98,-121,0,0,0,0 +units=m +no_defs"
+
+#original format: EPSG:23031 ED50 / UTM zone 31N
+#final format: EPSG:4326 WGS 84
+
+pj <- proj4::project(df.2, proj4string, inverse=TRUE)
+latlon <- data.frame(lat=pj$y, lon=pj$x)%>%
+                rownames_to_column(var="ID")%>%
+                left_join(df%>%
+                                  dplyr::select(ID,L1,L2,X,Y),
+                          by="ID")%>%
+                as.data.frame()
+``` 
+
+We can arrange our information to be a true data.frame without geometry. We also mark those acoustic records that are higher than 60dB(A) which is the limit in A2 areas like schools, as they are areas of higher sensitivity to acoustic pollution.
+
+```{r}
+acus_latlon <- latlon %>%
+                left_join(sf%>%
+                                  as.data.frame()%>%
+                                  rownames_to_column(var="L2")%>%
+                                  mutate(L2=as.numeric(L2))%>%
+                                  dplyr::select(-geom)%>%
+                                  distinct(),
+                          by="L2")%>%
+                mutate(OVER_60=ifelse(TOTAL_D=="60 - 65 dB(A)","OVER_60_dB","UNDER_60_dB"),
+                       OVER_60=ifelse(TOTAL_D=="65 - 70 dB(A)","OVER_60_dB",OVER_60),
+                       OVER_60=ifelse(TOTAL_D=="70 - 75 dB(A)","OVER_60_dB",OVER_60),
+                       OVER_60=ifelse(TOTAL_D=="75 - 80 dB(A)","OVER_60_dB",OVER_60))
+```
+
+Now we want to plot this acoustic data by neighborhood. In order to produce cuter plots we will filter only those coordinates that fall within the neighborhood or district's polygon. To do so, I follow [benmarwick](https://gist.github.com/benmarwick/70f92dd61700abab1b590afa0040e3fa)'s tutorial. Basically we need the polygon and points to be in the same coordinate system, then set CRS from points to be the same as polygon shapefile, merge files and filter data to be plotted.
+
+```{r}
+#code to make sure only points within polygon are plotted:
+#1.EDUCATION
+points_edu <- st_as_sf(edu, coords = c("X_ED50", "Y_ED50"))
+st_crs(points_edu) <- st_crs(barris.df) #set crs from edu points to crs of barris
+edu_barris <- st_join(points_edu, barris.df) #this will be the data point df that we will filter
+#2.ACOUSTICS
+points_acu <- st_as_sf(acus_latlon, coords = c("X", "Y"))
+st_crs(points_acu) <- st_crs(barris.df)
+acu_barris <- st_join(points_acu,barris.df)
+#sf objects can only be plotted properly with geom_sf, as we want other geoms
+#we will take advantage that now we know to which district and neighborhood
+#the acoustic trams belong and add this info to our original acus_latlon dataset
+acus_latlon.2 <- acus_latlon %>%
+                        left_join(as.data.frame(acu_barris)%>%
+                                          dplyr::select(TRAM,Codi_Districte,Codi_Barri)%>%
+                                          distinct(),
+                                  by="TRAM")%>%
+                        left_join(districte,
+                                  by=c("Codi_Districte","Codi_Barri"))
+
+```
+
+## Distance between school and acoustic trams  
+
+We want to plot the acoustic samplings happening at 50m or closer to schools. First we generate dataframes with this info and then merge this info in `distance.edu.acu.50`:
+
+```{r}
+# list to iterate over
+dislist <- list()
+dislist$names <- as.list(levels(factor(barris.df$Nom_Districte)))
+dislist$ids <- c("dist_cv","dist_eix","dist_gra","dist_hg","dist_cor","dist_noub","dist_sand","dist_smar",
+                 "dist_sants","dist_sarr")
+
+plotlist_edu_acu <- list()
+i <- 1
+for (i in 1:length(dislist$names)){
+                #filter education and acoustic points that match only the specific district
+                points_edu <- st_as_sf(edu%>%
+                                        filter(NOM_DISTRICTE==dislist$names[[i]])%>%
+                                        droplevels()%>%
+                                        distinct(), 
+                                coords = c("X_ED50", "Y_ED50"))
+                points_acu <- st_as_sf(acus_latlon.2%>%
+                                        filter(Nom_Districte==dislist$names[[i]],
+                                               OVER_60=="OVER_60_dB")%>%
+                                        droplevels()%>%
+                                        distinct(), 
+                                coords = c("X", "Y"))
+                #make sure both datasets share crs
+                st_crs(points_acu) <- st_crs(points_edu)
+                #calculate distances (in m) between coordinates
+                edu.acu.dist.raw <- st_distance(points_edu,points_acu,by_element=FALSE)
+                edu.acu.dist <- edu.acu.dist.raw%>%
+                                                as.data.frame()
+                #setting colnames with acoustic tram ID
+                colnames(edu.acu.dist) <- paste(points_acu$TRAM,points_acu$ID,sep="_")
+                #binding distances to school dataframe
+                dist <- cbind(points_edu,edu.acu.dist)
+                #melt and filter shortest distance per school, <=50m
+                short.dist.50.edu <- dist%>%
+                        as.data.frame()%>%
+                        dplyr::select(-geometry)%>%
+                        reshape2::melt(id.vars=c("CODI_EQUIPAMENT","EQUIPAMENT","NUM_BARRI",
+                                                 "NOM_DISTRICTE","LATITUD","LONGITUD"))%>%
+                        rename(TRAM_ID=variable,DISTANCE=value)%>%
+                        filter(DISTANCE<=50)%>%
+                        droplevels()%>%
+                        dplyr::select(CODI_EQUIPAMENT,TRAM_ID,LATITUD,LONGITUD)%>%
+                        separate(TRAM_ID,c("TRAM","ID"),sep="_")%>%
+                        dplyr::select(-TRAM)%>%
+                        left_join(acus_latlon.2,by="ID")%>%
+                        drop_na()
+                #save object
+                assign(paste(dislist$ids[[i]],"_acu_edu",sep=""), short.dist.50.edu)
+}
+distance.edu.acu.50 <- rbind(dist_cor_acu_edu,
+                             dist_cv_acu_edu,
+                             dist_eix_acu_edu,
+                             dist_gra_acu_edu,
+                             dist_hg_acu_edu,
+                             dist_noub_acu_edu,
+                             dist_sand_acu_edu,
+                             dist_sants_acu_edu,
+                             dist_sarr_acu_edu,
+                             dist_smar_acu_edu)
+```
+
+### Categorise schools by highest acoustic record in 50m or less  
+
+Now we can plot, for each vulnerable district, only those acoustic areas at 50m or closer to schools coordinates. This way we can locate those schools that are more prone to acoustic discomfort.
+
+First define color palettes for acoustic categories:  
+
+```{r}
+cols.acu <- c("60 - 65 dB(A)"="#fef8c3",
+               "65 - 70 dB(A)"="#5ac1ad",
+               "70 - 75 dB(A)"="#4677a8",
+               "75 - 80 dB(A)"="#766cb3",
+               "<60 dB(A)"="#9edda4")
+```
+
+Generate dataframe with the info of those centers that have a maximum acoustic record above limits at 50 m or closer. The maximum record of each center will be stored in the variable `MAX_TOTALD_ID`.
+
+```{r}
+cat.distance.edu.acu.50 <- distance.edu.acu.50 %>%
+                                mutate(MAX_TOTALD=ifelse(TOTAL_D=="60 - 65 dB(A)","1","OTHER"),
+                                       MAX_TOTALD=ifelse(TOTAL_D=="65 - 70 dB(A)","2",MAX_TOTALD),
+                                       MAX_TOTALD=ifelse(TOTAL_D=="70 - 75 dB(A)","3",MAX_TOTALD),
+                                       MAX_TOTALD=ifelse(TOTAL_D=="75 - 80 dB(A)","4",MAX_TOTALD))%>%
+                                group_by(CODI_EQUIPAMENT)%>%
+                                summarise(MAX_TOTALD_2=max(MAX_TOTALD))%>%
+                                mutate(MAX_TOTALD_ID=ifelse(MAX_TOTALD_2=="1","60 - 65 dB(A)","OTHER"),
+                                       MAX_TOTALD_ID=ifelse(MAX_TOTALD_2=="2","65 - 70 dB(A)",MAX_TOTALD_ID),
+                                       MAX_TOTALD_ID=ifelse(MAX_TOTALD_2=="3","70 - 75 dB(A)",MAX_TOTALD_ID),
+                                       MAX_TOTALD_ID=ifelse(MAX_TOTALD_2=="4","75 - 80 dB(A)",MAX_TOTALD_ID),
+                                       TOTAL_D=MAX_TOTALD_ID)%>%
+                                left_join(distance.edu.acu.50,
+                                          by=c("CODI_EQUIPAMENT","TOTAL_D"))
+``` 
+
+Barplot to have of view of how many schools are subject to every acoustic level:
+
+```{r}
+cat.distance.edu.acu.50 %>%
+                        dplyr::select(CODI_EQUIPAMENT,MAX_TOTALD_ID)%>%
+                        distinct()%>%
+                        group_by(MAX_TOTALD_ID)%>%
+                        summarise(n=n())%>%
+                        rbind(c("<60 dB(A)",635-411))%>%
+                        mutate(n=as.numeric(n),
+                               perc=(n/635)*100)%>%
+                        as.data.frame()%>%
+                        ggplot()+
+                             geom_col(aes(x=factor(MAX_TOTALD_ID,
+                                                   levels=c("75 - 80 dB(A)","70 - 75 dB(A)",
+                                                            "65 - 70 dB(A)","60 - 65 dB(A)","<60 dB(A)")),
+                                        y=n,
+                                        fill=MAX_TOTALD_ID,
+                                        col=MAX_TOTALD_ID),
+                                      alpha=0.8)+
+                                geom_text(aes(x=factor(MAX_TOTALD_ID,
+                                                   levels=c("75 - 80 dB(A)","70 - 75 dB(A)",
+                                                            "65 - 70 dB(A)","60 - 65 dB(A)","<60 dB(A)")),
+                                             y=200, label=paste(as.character(n),"(",
+                                                              round(perc,digits=1),"%)",sep="")))+
+                                scale_fill_manual(values = cols.acu)+
+                                scale_color_manual(values=cols.acu)+
+                                theme_ipsum_rc(grid="")+
+                                scale_x_discrete("")+
+                                scale_y_continuous("")+
+                                theme(axis.text.x = element_text(angle=90,hjust=1,vjust=0.5),
+                                      axis.text.y = element_blank())+
+                                coord_flip()
+```
+
+Here we add info on neighborhoods so that we can see schools not only based on their maximum acoustic record, but also by neighborhood or district:
+
+```{r fig.width=10,fig.height=8}
+cat.nsch <- cat.distance.edu.acu.50 %>%
+                dplyr::select(Nom_Districte,Nom_Barri,CODI_EQUIPAMENT,MAX_TOTALD_ID)%>%
+                distinct()%>%
+                group_by(Nom_Districte,Nom_Barri,MAX_TOTALD_ID)%>%
+                summarise(nescoles=n())%>%
+                left_join(edu_barris%>%
+                                        as.data.frame()%>%
+                                        dplyr::select(-geometry)%>%
+                                        group_by(Nom_Districte)%>%
+                                        summarise(totalescoles=n())%>%
+                                        ungroup(),
+                          by="Nom_Districte")%>%
+                mutate(percescoles=(nescoles/totalescoles)*100)
+                
+plot.cat.nsch <- cat.nsch%>%
+                        left_join(cat.nsch%>%
+                                          group_by(Nom_Barri)%>%
+                                          summarise(barri_percescoles=sum(percescoles))%>%
+                                          ungroup(),
+                                  by="Nom_Barri")%>%
+                        mutate(order=paste(Nom_Districte,barri_percescoles,Nom_Barri,sep="_"))%>%
+                        distinct()
+
+
+#Order Nom_Barri first by district name and then by percentage of schools (descending)
+barri.levels <- plot.cat.nsch$Nom_Barri[order(plot.cat.nsch$Nom_Districte, 
+                                                                -plot.cat.nsch$barri_percescoles)]%>%
+                as.data.frame()%>%
+                distinct()%>%
+                as.list()
+
+plot.cat.nsch$Nom_Barri <- factor(plot.cat.nsch$Nom_Barri, 
+                           levels=barri.levels$.)
+#plot
+plot.cat.nsch%>%
+        ggplot()+
+                geom_col(aes(x=Nom_Barri,
+                             y=percescoles,
+                             fill=MAX_TOTALD_ID,
+                             col=MAX_TOTALD_ID),
+                         alpha=0.8)+
+                theme_ipsum_rc(grid="Y")+
+                scale_x_discrete("")+
+                scale_y_continuous("",limits=c(-1,18))+
+                scale_fill_manual(values=cols.acu)+
+                scale_color_manual(values=cols.acu)+
+                new_scale_color()+
+                geom_point(data=plot.cat.nsch%>%
+                                   dplyr::select(Nom_Barri,Nom_Districte)%>%
+                                   distinct()%>%
+                                   as.data.frame(),
+                           aes(x=Nom_Barri,
+                               y=-1,
+                               col=Nom_Districte),
+                           size=5,shape=15,alpha=0.8)+
+                theme(axis.text.x = element_text(angle=90,hjust=1,vjust=0.5))+
+                theme(legend.position="bottom")
+```
+
+In order to detect those neighborhoods more in need of action against acoustic contamination close to schools, we calculate the mean number of schools that are in danger per neighborhood and focus on those that are above the mean.
+
+```{r fig.height=10, fig.width=10}
+lolli.cat.nsch <- plot.cat.nsch %>%
+        mutate(MEAN=mean(plot.cat.nsch$barri_percescoles),
+               DIFFMEAN=barri_percescoles-MEAN,
+               COL=ifelse(DIFFMEAN>0,"OVER","UNDER"))
+
+lolli.cat.nsch %>%
+        ggplot()+
+                ggtitle("Percentatge d'escoles a prop de nivells acoustic nocius per sobre la mitjana de cada barri")+
+                geom_vline(xintercept = mean(plot.cat.nsch$barri_percescoles),
+                           linetype="dotted",
+                           size=0.25)+
+                geom_segment(aes(x = mean(plot.cat.nsch$barri_percescoles),
+                                 y = fct_reorder(Nom_Barri,as.numeric(DIFFMEAN),.desc = F),
+                                 xend = MEAN+DIFFMEAN,
+                                 yend = fct_reorder(Nom_Barri,as.numeric(DIFFMEAN),.desc = F)),
+                             color = "grey50",
+                             alpha=0.8)+
+                geom_point(aes(y=fct_reorder(Nom_Barri,as.numeric(DIFFMEAN),.desc = F),
+                               x=MEAN+DIFFMEAN,col=COL,fill=COL),
+                           size=4)+
+                geom_text(aes(y=fct_reorder(Nom_Barri,as.numeric(DIFFMEAN),.desc = F),
+                               x=ifelse(MEAN+DIFFMEAN > MEAN, MEAN+DIFFMEAN + 0.6, MEAN+DIFFMEAN - 0.6),
+                               label=paste(round(MEAN+DIFFMEAN,digits=1),"%",sep=""),
+                              col=COL)) +
+                theme_ipsum_rc(grid="")+
+                scale_y_discrete("")+
+                scale_x_continuous("")+
+                theme(axis.text.x = element_text(angle=90,hjust=1,vjust=0.5),
+                      legend.position = "none")
+```
+
+Some more plotting and number crunching:
+
+```{r}
+#22 neighborhoods have schools over the mean daily dB, belonging to 10 districts
+lolli.cat.nsch %>%
+                filter(COL=="OVER")%>%
+                droplevels()%>%
+                dplyr::select(Nom_Districte,nescoles,MAX_TOTALD_ID)%>%
+                group_by(Nom_Districte,MAX_TOTALD_ID)%>%
+                summarise(total_nescoles_tram=sum(nescoles))%>%
+                ungroup()%>%
+                left_join(lolli.cat.nsch%>%
+                                  filter(COL=="OVER")%>%
+                                  droplevels()%>%
+                                  dplyr::select(Nom_Districte,nescoles)%>%
+                                  group_by(Nom_Districte)%>%
+                                  summarise(total_nescoles=sum(nescoles))%>%
+                                  ungroup(),
+                          by="Nom_Districte")%>%
+                ggplot()+
+                        geom_col(aes(y=total_nescoles_tram,
+                                     x=fct_reorder(Nom_Districte,total_nescoles,.desc=T),
+                                     fill=MAX_TOTALD_ID),
+                                  alpha=0.8)+
+                        theme_ipsum_rc(grid="Y")+
+                        scale_x_discrete("")+
+                        scale_y_continuous("Numero d'escoles")+
+                        scale_fill_manual("",values=cols.acu)+
+                        scale_color_manual("",values=cols.acu)+
+                        theme(axis.text.x = element_text(angle=90,hjust=1,vjust=0.5),
+                              legend.position="right")
+
+vuln.distance.edu.acu.50 <- lolli.cat.nsch %>%
+                                filter(COL=="OVER")%>%
+                                droplevels()%>%
+                                dplyr::select(Nom_Districte,Nom_Barri)%>%
+                                distinct()%>%
+                                left_join(cat.distance.edu.acu.50,
+                                          by=c("Nom_Districte","Nom_Barri"))%>%
+                                ungroup()
+
+## 277 vulnerable centres (above neighborhood mean)
+vuln.distance.edu.acu.50%>%
+                        dplyr::select(CODI_EQUIPAMENT)%>%
+                        distinct()%>%
+                        summarise(n())
+
+# Centres vulnerables a tots els districtes
+plot.vuln.district <- vuln.distance.edu.acu.50%>%
+                        dplyr::select(CODI_EQUIPAMENT,Nom_Districte)%>%
+                        distinct()%>%
+                        group_by(Nom_Districte)%>%
+                        summarise(vuln.districte=n())%>%
+                        ungroup()%>%
+                        left_join(n.edu.dist%>%
+                                          rename(Nom_Districte=NOM_DISTRICTE),
+                                  by="Nom_Districte")%>%
+                        mutate(vuln.perc=(vuln.districte/equi.districte)*100,
+                               non.vuln.perc=(100-vuln.perc),
+                               non.vuln.n=equi.districte-vuln.districte)
+
+# barplot with vulnerable centers per district out of total number of centers
+
+cols.vuln <- c("vuln.perc"="#ff897d",
+               "non.vuln.perc"="#818391")
+
+#order levels of district name as done in district map (illustrator)
+
+plot.vuln.district$Nom_Districte <- factor(plot.vuln.district$Nom_Districte,
+                                           levels=c("Sants-Montjuic","Les Corts","Ciutat Vella",
+                                                    "Eixample","Sarria-Sant Gervasi",
+                                                    "Gracia","Sant Marti","Horta-Guinardo",
+                                                    "Sant Andreu","Nou Barris"))
+
+plot.vuln.district %>%
+                        melt(id.vars=c("Nom_Districte","vuln.districte","equi.districte","non.vuln.n"))%>%
+                        ggplot()+
+                                ggtitle("Escoles acu-vulnerables per districte",
+                                        subtitle="Respecte el total d'escoles per districte")+
+                                geom_col(aes(y=Nom_Districte,
+                                             x=value,
+                                             fill=variable,
+                                             col=variable),
+                                         alpha=0.2)+
+                                scale_fill_manual("",values=cols.vuln)+
+                                scale_color_manual("",values=cols.vuln)+
+                                geom_text(aes(x=ifelse(variable=="non.vuln.perc",6,94),
+                                              y=Nom_Districte,
+                                              label=paste(ifelse(variable=="non.vuln.perc",equi.districte,vuln.districte)," (",
+                                                          round(value,digits=1),")%",sep=""),
+                                              col=variable),
+                                          size=2.5) +
+                                theme_ipsum_rc(grid="")+
+                                scale_y_discrete("")+
+                                scale_x_continuous("",breaks=c(25,50,75,100))+
+                                theme(axis.text.x = element_text(angle=90,hjust=1,vjust=0.5),
+                                      legend.position = "none")
+
+# Number of neighborhoods with vulnerable centers
+vuln.distance.edu.acu.50%>%
+                        dplyr::select(Nom_Barri)%>%
+                        distinct()%>%
+                        summarise(nbarri=n())
+
+# number of vulnerable centers and their classification by acoustic category
+vuln.distance.edu.acu.50%>%
+                        dplyr::select(CODI_EQUIPAMENT,MAX_TOTALD_ID,MAX_TOTALD_2)%>%
+                        distinct()%>%
+                        group_by(MAX_TOTALD_ID)%>%
+                        summarise(n())
+                
+# Centres vulnerables a tots els districtes per categoria acoustica
+plot.vuln.tram <- vuln.distance.edu.acu.50%>%
+                        dplyr::select(CODI_EQUIPAMENT,Nom_Districte,MAX_TOTALD_ID)%>%
+                        distinct()%>%
+                        group_by(Nom_Districte,MAX_TOTALD_ID)%>%
+                        summarise(n.tram=n())%>%
+                        ungroup()%>%
+                        left_join(plot.vuln.district%>%
+                                          dplyr::select(Nom_Districte,vuln.districte),
+                                  by="Nom_Districte")%>%
+                        mutate(vuln.perc=(n.tram/vuln.districte)*100)
+
+plot.vuln.tram$Nom_Districte <- factor(plot.vuln.tram$Nom_Districte,
+                                           levels=c("Sants-Montjuic","Les Corts","Ciutat Vella",
+                                                    "Eixample","Sarria-Sant Gervasi",
+                                                    "Gracia","Sant Marti","Horta-Guinardo",
+                                                    "Sant Andreu","Nou Barris"))
+
+plot.vuln.tram %>%
+                        ggplot()+
+                                ggtitle("Escoles acu-vulnerables per districte",
+                                        subtitle="Per categoria d'immisio sonora maxima")+
+                                geom_col(aes(y=Nom_Districte,
+                                             x=vuln.perc,
+                                             fill=MAX_TOTALD_ID,
+                                             col=MAX_TOTALD_ID),
+                                         alpha=0.8)+
+                                scale_fill_manual("",values=cols.acu)+
+                                scale_color_manual("",values=cols.acu)+
+                                theme_ipsum_rc(grid="")+
+                                scale_y_discrete("")+
+                                scale_x_continuous("",breaks=c(25,50,75,100))+
+                                theme(axis.text.x = element_text(angle=90,hjust=1,vjust=0.5),
+                                      legend.position = "none")
+```
+
+### Top 5 neighborhoods with schools in higher vulnerability to acoustic contamination 
+
+Now we will map those neighborhoods of interest, using `stat_bin_2d` to plot acoustic records and the schools that are in danger (meaning at <=50 m from the acoustic record).
+
+#### Les Corts
+
+Data:
+
+```{r}
+dis.name <- c("les Corts")
+plot.schools.50m <- vuln.distance.edu.acu.50 %>%
+                        filter(Nom_Barri==dis.name)%>%
+                        droplevels()
+dis <- barris.df %>%
+                filter(Nom_Barri == dis.name)
+min_x <- barris.df.2%>%
+                filter(Nom_Barri == dis.name)%>%
+                droplevels()%>%
+                filter(min_x==min(min_x))%>%
+                dplyr::select(min_x)
+min_y <- barris.df.2%>%
+                filter(Nom_Barri == dis.name)%>%
+                droplevels()%>%
+                filter(min_y==min(min_y))%>%
+                dplyr::select(min_y)
+max_x <- barris.df.2%>%
+                filter(Nom_Barri == dis.name)%>%
+                droplevels()%>%
+                filter(max_x==max(max_x))%>%
+                dplyr::select(max_x)
+max_y <- barris.df.2%>%
+                filter(Nom_Barri == dis.name)%>%
+                droplevels()%>%
+                filter(max_y==max(max_y))%>%
+                dplyr::select(max_y)
+```
+
+Total plot:  
+
+```{r fig.width=10, warning=F}
+dis%>%
+                        ggplot() +
+                          ggtitle(dis.name)+
+                          stat_bin2d(data=acus_latlon.2%>%
+                                                          filter(TOTAL_D=="60 - 65 dB(A)")%>%
+                                                          droplevels()%>%
+                                                          drop_na()%>%
+                                                          distinct()%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                   filter(Nom_Barri==dis.name,
+                                                                          TOTAL_D=="60 - 65 dB(A)")%>%
+                                                                   droplevels()%>%
+                                                                   dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                           by="Nom_Barri"),
+                                         aes(x=X,y=Y),
+                                             fill = "#fef8c3",
+                                         binwidth = c(80,80),alpha=0.6) +
+                          stat_bin2d(data=acus_latlon.2%>%
+                                                          filter(Nom_Barri==dis.name,
+                                                                 TOTAL_D=="65 - 70 dB(A)")%>%
+                                                          droplevels()%>%
+                                                          drop_na()%>%
+                                                          distinct()%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                   filter(Nom_Barri==dis.name,
+                                                                          TOTAL_D=="65 - 70 dB(A)")%>%
+                                                                   droplevels()%>%
+                                                                   dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                           by="Nom_Barri"),
+                                         aes(x=X,y=Y),
+                                         fill="#5ac1ad",
+                                         binwidth = c(80,80),alpha=0.6) +
+                          stat_bin2d(data=acus_latlon.2%>%
+                                                          filter(Nom_Barri==dis.name,
+                                                                 TOTAL_D=="70 - 75 dB(A)")%>%
+                                                          droplevels()%>%
+                                                          drop_na()%>%
+                                                          distinct()%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                   filter(Nom_Barri==dis.name,
+                                                                          TOTAL_D=="70 - 75 dB(A)")%>%
+                                                                   droplevels()%>%
+                                                                   dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                           by="Nom_Barri"),
+                                         aes(x=X,y=Y),
+                                             fill = "#4677a8",
+                                         binwidth = c(80,80),alpha=0.6) +
+                          stat_bin2d(data=acus_latlon.2%>%
+                                                          filter(Nom_Barri==dis.name,
+                                                                 TOTAL_D=="75 - 80 dB(A)")%>%
+                                                          droplevels()%>%
+                                                          drop_na()%>%
+                                                          distinct()%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                             dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                           by="Nom_Barri"),
+                                         aes(x=X,y=Y),
+                                             fill = "#766cb3",
+                                         binwidth = c(80,80),alpha=0.6) +
+                          geom_sf(data = streets$osm_lines,
+                                  col = "#bbb4b6",
+                                  size = .1,
+                                  alpha = .3) +
+                          geom_sf(data = highways$osm_lines,
+                                  col = "#bbb4b6",
+                                  size = .3,
+                                  alpha = .6)+
+                          geom_sf(data = river$osm_lines,
+                                  inherit.aes = FALSE,
+                                  color = "#4adbc8",
+                                  size = 1,
+                                  alpha = .6) +
+                          geom_sf(data=barris.df%>%
+                                                filter(Nom_Barri==dis.name)%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                   filter(Nom_Barri==dis.name)%>%
+                                                                   droplevels()%>%
+                                                                   dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                                   by="Nom_Barri"),
+                                  colour = "#636363",alpha=0,size=0.6)+
+                          geom_sf(data=edu_barris%>%
+                                          right_join(vuln.distance.edu.acu.50%>%
+                                                             filter(Nom_Barri==dis.name)%>%
+                                                             dplyr::select(CODI_EQUIPAMENT,MAX_TOTALD_ID)%>%
+                                                             distinct()%>%
+                                                             drop_na(),
+                                                    by="CODI_EQUIPAMENT"),
+                                   alpha=0.8,
+                                   col="black",
+                                   size=3)+
+                          coord_sf(xlim = c(min_x$min_x,max_x$max_x),
+                                    ylim = c(min_y$min_y,max_y$max_y))+
+                          scale_x_continuous(limits = c(min_x$min_x,max_x$max_x))+
+                          scale_y_continuous(limits=c(min_y$min_y,max_y$max_y))+
+                          theme_ipsum_rc(grid=F)+
+                          theme(axis.text.x = element_blank(),
+                                axis.text.y = element_blank(),
+                                axis.title.x =element_blank(),
+                                axis.title.y = element_blank(),
+                                legend.position = "bottom")
+```
+
+#### El Raval
+Data:
+
+```{r}
+dis.name <- c("el Raval")
+plot.schools.50m <- vuln.distance.edu.acu.50 %>%
+                        filter(Nom_Barri==dis.name)%>%
+                        droplevels()
+dis <- barris.df %>%
+                filter(Nom_Barri == dis.name)
+min_x <- barris.df.2%>%
+                filter(Nom_Barri == dis.name)%>%
+                droplevels()%>%
+                filter(min_x==min(min_x))%>%
+                dplyr::select(min_x)
+min_y <- barris.df.2%>%
+                filter(Nom_Barri == dis.name)%>%
+                droplevels()%>%
+                filter(min_y==min(min_y))%>%
+                dplyr::select(min_y)
+max_x <- barris.df.2%>%
+                filter(Nom_Barri == dis.name)%>%
+                droplevels()%>%
+                filter(max_x==max(max_x))%>%
+                dplyr::select(max_x)
+max_y <- barris.df.2%>%
+                filter(Nom_Barri == dis.name)%>%
+                droplevels()%>%
+                filter(max_y==max(max_y))%>%
+                dplyr::select(max_y)
+```
+
+Total plot:  
+
+```{r fig.width=10}
+dis%>%
+                        ggplot() +
+                          ggtitle(dis.name)+
+                          stat_bin2d(data=acus_latlon.2%>%
+                                                          filter(TOTAL_D=="60 - 65 dB(A)")%>%
+                                                          droplevels()%>%
+                                                          drop_na()%>%
+                                                          distinct()%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                   filter(Nom_Barri==dis.name,
+                                                                          TOTAL_D=="60 - 65 dB(A)")%>%
+                                                                   droplevels()%>%
+                                                                   dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                           by="Nom_Barri"),
+                                         aes(x=X,y=Y),
+                                             fill = "#fef8c3",
+                                         binwidth = c(80,80),alpha=0.6) +
+                          stat_bin2d(data=acus_latlon.2%>%
+                                                          filter(Nom_Barri==dis.name,
+                                                                 TOTAL_D=="65 - 70 dB(A)")%>%
+                                                          droplevels()%>%
+                                                          drop_na()%>%
+                                                          distinct()%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                   filter(Nom_Barri==dis.name,
+                                                                          TOTAL_D=="65 - 70 dB(A)")%>%
+                                                                   droplevels()%>%
+                                                                   dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                           by="Nom_Barri"),
+                                         aes(x=X,y=Y),
+                                         fill="#5ac1ad",
+                                         binwidth = c(80,80),alpha=0.6) +
+                          stat_bin2d(data=acus_latlon.2%>%
+                                                          filter(Nom_Barri==dis.name,
+                                                                 TOTAL_D=="70 - 75 dB(A)")%>%
+                                                          droplevels()%>%
+                                                          drop_na()%>%
+                                                          distinct()%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                   filter(Nom_Barri==dis.name,
+                                                                          TOTAL_D=="70 - 75 dB(A)")%>%
+                                                                   droplevels()%>%
+                                                                   dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                           by="Nom_Barri"),
+                                         aes(x=X,y=Y),
+                                             fill = "#4677a8",
+                                         binwidth = c(80,80),alpha=0.6) +
+                          stat_bin2d(data=acus_latlon.2%>%
+                                                          filter(Nom_Barri==dis.name,
+                                                                 TOTAL_D=="75 - 80 dB(A)")%>%
+                                                          droplevels()%>%
+                                                          drop_na()%>%
+                                                          distinct()%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                             dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                           by="Nom_Barri"),
+                                         aes(x=X,y=Y),
+                                             fill = "#766cb3",
+                                         binwidth = c(80,80),alpha=0.6) +
+                          geom_sf(data = streets$osm_lines,
+                                  col = "#bbb4b6",
+                                  size = .1,
+                                  alpha = .3) +
+                          geom_sf(data = highways$osm_lines,
+                                  col = "#bbb4b6",
+                                  size = .3,
+                                  alpha = .6)+
+                          geom_sf(data = river$osm_lines,
+                                  inherit.aes = FALSE,
+                                  color = "#4adbc8",
+                                  size = 1,
+                                  alpha = .6) +
+                          geom_sf(data=barris.df%>%
+                                                filter(Nom_Barri==dis.name)%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                   filter(Nom_Barri==dis.name)%>%
+                                                                   droplevels()%>%
+                                                                   dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                                   by="Nom_Barri"),
+                                  colour = "#636363",alpha=0,size=0.6)+
+                          geom_sf(data=edu_barris%>%
+                                          right_join(vuln.distance.edu.acu.50%>%
+                                                             filter(Nom_Barri==dis.name)%>%
+                                                             dplyr::select(CODI_EQUIPAMENT,MAX_TOTALD_ID)%>%
+                                                             distinct()%>%
+                                                             drop_na(),
+                                                    by="CODI_EQUIPAMENT"),
+                                   alpha=0.8,
+                                   col="black",
+                                   size=3)+
+                          coord_sf(xlim = c(min_x$min_x,max_x$max_x),
+                                    ylim = c(min_y$min_y,max_y$max_y))+
+                          scale_x_continuous(limits = c(min_x$min_x,max_x$max_x))+
+                          scale_y_continuous(limits=c(min_y$min_y,max_y$max_y))+
+                          theme_ipsum_rc(grid=F)+
+                          theme(axis.text.x = element_blank(),
+                                axis.text.y = element_blank(),
+                                axis.title.x =element_blank(),
+                                axis.title.y = element_blank(),
+                                legend.position = "bottom")
+```
+
+#### La Vila de Gracia
+Data:
+
+```{r}
+dis.name <- c("la Vila de Gracia")
+plot.schools.50m <- vuln.distance.edu.acu.50 %>%
+                        filter(Nom_Barri==dis.name)%>%
+                        droplevels()
+dis <- barris.df %>%
+                filter(Nom_Barri == dis.name)
+min_x <- barris.df.2%>%
+                filter(Nom_Barri == dis.name)%>%
+                droplevels()%>%
+                filter(min_x==min(min_x))%>%
+                dplyr::select(min_x)
+min_y <- barris.df.2%>%
+                filter(Nom_Barri == dis.name)%>%
+                droplevels()%>%
+                filter(min_y==min(min_y))%>%
+                dplyr::select(min_y)
+max_x <- barris.df.2%>%
+                filter(Nom_Barri == dis.name)%>%
+                droplevels()%>%
+                filter(max_x==max(max_x))%>%
+                dplyr::select(max_x)
+max_y <- barris.df.2%>%
+                filter(Nom_Barri == dis.name)%>%
+                droplevels()%>%
+                filter(max_y==max(max_y))%>%
+                dplyr::select(max_y)
+```
+
+Total plot:  
+
+```{r fig.width=10}
+dis%>%
+                        ggplot() +
+                          ggtitle(dis.name)+
+                          stat_bin2d(data=acus_latlon.2%>%
+                                                          filter(TOTAL_D=="60 - 65 dB(A)")%>%
+                                                          droplevels()%>%
+                                                          drop_na()%>%
+                                                          distinct()%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                   filter(Nom_Barri==dis.name,
+                                                                          TOTAL_D=="60 - 65 dB(A)")%>%
+                                                                   droplevels()%>%
+                                                                   dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                           by="Nom_Barri"),
+                                         aes(x=X,y=Y),
+                                             fill = "#fef8c3",
+                                         binwidth = c(80,80),alpha=0.6) +
+                          stat_bin2d(data=acus_latlon.2%>%
+                                                          filter(Nom_Barri==dis.name,
+                                                                 TOTAL_D=="65 - 70 dB(A)")%>%
+                                                          droplevels()%>%
+                                                          drop_na()%>%
+                                                          distinct()%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                   filter(Nom_Barri==dis.name,
+                                                                          TOTAL_D=="65 - 70 dB(A)")%>%
+                                                                   droplevels()%>%
+                                                                   dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                           by="Nom_Barri"),
+                                         aes(x=X,y=Y),
+                                         fill="#5ac1ad",
+                                         binwidth = c(80,80),alpha=0.6) +
+                          stat_bin2d(data=acus_latlon.2%>%
+                                                          filter(Nom_Barri==dis.name,
+                                                                 TOTAL_D=="70 - 75 dB(A)")%>%
+                                                          droplevels()%>%
+                                                          drop_na()%>%
+                                                          distinct()%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                   filter(Nom_Barri==dis.name,
+                                                                          TOTAL_D=="70 - 75 dB(A)")%>%
+                                                                   droplevels()%>%
+                                                                   dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                           by="Nom_Barri"),
+                                         aes(x=X,y=Y),
+                                             fill = "#4677a8",
+                                         binwidth = c(80,80),alpha=0.6) +
+                          stat_bin2d(data=acus_latlon.2%>%
+                                                          filter(Nom_Barri==dis.name,
+                                                                 TOTAL_D=="75 - 80 dB(A)")%>%
+                                                          droplevels()%>%
+                                                          drop_na()%>%
+                                                          distinct()%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                             dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                           by="Nom_Barri"),
+                                         aes(x=X,y=Y),
+                                             fill = "#766cb3",
+                                         binwidth = c(80,80),alpha=0.6) +
+                          geom_sf(data = streets$osm_lines,
+                                  col = "#bbb4b6",
+                                  size = .1,
+                                  alpha = .3) +
+                          geom_sf(data = highways$osm_lines,
+                                  col = "#bbb4b6",
+                                  size = .3,
+                                  alpha = .6)+
+                          geom_sf(data = river$osm_lines,
+                                  inherit.aes = FALSE,
+                                  color = "#4adbc8",
+                                  size = 1,
+                                  alpha = .6) +
+                          geom_sf(data=barris.df%>%
+                                                filter(Nom_Barri==dis.name)%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                   filter(Nom_Barri==dis.name)%>%
+                                                                   droplevels()%>%
+                                                                   dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                                   by="Nom_Barri"),
+                                  colour = "#636363",alpha=0,size=0.6)+
+                          geom_sf(data=edu_barris%>%
+                                          right_join(vuln.distance.edu.acu.50%>%
+                                                             filter(Nom_Barri==dis.name)%>%
+                                                             dplyr::select(CODI_EQUIPAMENT,MAX_TOTALD_ID)%>%
+                                                             distinct()%>%
+                                                             drop_na(),
+                                                    by="CODI_EQUIPAMENT"),
+                                   alpha=0.8,
+                                   col="black",
+                                   size=3)+
+                          coord_sf(xlim = c(min_x$min_x,max_x$max_x),
+                                    ylim = c(min_y$min_y,max_y$max_y))+
+                          scale_x_continuous(limits = c(min_x$min_x,max_x$max_x))+
+                          scale_y_continuous(limits=c(min_y$min_y,max_y$max_y))+
+                          theme_ipsum_rc(grid=F)+
+                          theme(axis.text.x = element_blank(),
+                                axis.text.y = element_blank(),
+                                axis.title.x =element_blank(),
+                                axis.title.y = element_blank(),
+                                legend.position = "bottom")
+```
+
+#### Sant Andreu
+Data:
+
+```{r}
+dis.name <- c("Sant Andreu")
+plot.schools.50m <- vuln.distance.edu.acu.50 %>%
+                        filter(Nom_Barri==dis.name)%>%
+                        droplevels()
+dis <- barris.df %>%
+                filter(Nom_Barri == dis.name)
+min_x <- barris.df.2%>%
+                filter(Nom_Barri == dis.name)%>%
+                droplevels()%>%
+                filter(min_x==min(min_x))%>%
+                dplyr::select(min_x)
+min_y <- barris.df.2%>%
+                filter(Nom_Barri == dis.name)%>%
+                droplevels()%>%
+                filter(min_y==min(min_y))%>%
+                dplyr::select(min_y)
+max_x <- barris.df.2%>%
+                filter(Nom_Barri == dis.name)%>%
+                droplevels()%>%
+                filter(max_x==max(max_x))%>%
+                dplyr::select(max_x)
+max_y <- barris.df.2%>%
+                filter(Nom_Barri == dis.name)%>%
+                droplevels()%>%
+                filter(max_y==max(max_y))%>%
+                dplyr::select(max_y)
+```
+
+Total plot:  
+
+```{r fig.width=10}
+dis%>%
+                        ggplot() +
+                          ggtitle(dis.name)+
+                          stat_bin2d(data=acus_latlon.2%>%
+                                                          filter(TOTAL_D=="60 - 65 dB(A)")%>%
+                                                          droplevels()%>%
+                                                          drop_na()%>%
+                                                          distinct()%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                   filter(Nom_Barri==dis.name,
+                                                                          TOTAL_D=="60 - 65 dB(A)")%>%
+                                                                   droplevels()%>%
+                                                                   dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                           by="Nom_Barri"),
+                                         aes(x=X,y=Y),
+                                             fill = "#fef8c3",
+                                         binwidth = c(80,80),alpha=0.6) +
+                          stat_bin2d(data=acus_latlon.2%>%
+                                                          filter(Nom_Barri==dis.name,
+                                                                 TOTAL_D=="65 - 70 dB(A)")%>%
+                                                          droplevels()%>%
+                                                          drop_na()%>%
+                                                          distinct()%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                   filter(Nom_Barri==dis.name,
+                                                                          TOTAL_D=="65 - 70 dB(A)")%>%
+                                                                   droplevels()%>%
+                                                                   dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                           by="Nom_Barri"),
+                                         aes(x=X,y=Y),
+                                         fill="#5ac1ad",
+                                         binwidth = c(80,80),alpha=0.6) +
+                          stat_bin2d(data=acus_latlon.2%>%
+                                                          filter(Nom_Barri==dis.name,
+                                                                 TOTAL_D=="70 - 75 dB(A)")%>%
+                                                          droplevels()%>%
+                                                          drop_na()%>%
+                                                          distinct()%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                   filter(Nom_Barri==dis.name,
+                                                                          TOTAL_D=="70 - 75 dB(A)")%>%
+                                                                   droplevels()%>%
+                                                                   dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                           by="Nom_Barri"),
+                                         aes(x=X,y=Y),
+                                             fill = "#4677a8",
+                                         binwidth = c(80,80),alpha=0.6) +
+                          stat_bin2d(data=acus_latlon.2%>%
+                                                          filter(Nom_Barri==dis.name,
+                                                                 TOTAL_D=="75 - 80 dB(A)")%>%
+                                                          droplevels()%>%
+                                                          drop_na()%>%
+                                                          distinct()%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                             dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                           by="Nom_Barri"),
+                                         aes(x=X,y=Y),
+                                             fill = "#766cb3",
+                                         binwidth = c(80,80),alpha=0.6) +
+                          geom_sf(data = streets$osm_lines,
+                                  col = "#bbb4b6",
+                                  size = .1,
+                                  alpha = .3) +
+                          geom_sf(data = highways$osm_lines,
+                                  col = "#bbb4b6",
+                                  size = .3,
+                                  alpha = .6)+
+                          geom_sf(data = river$osm_lines,
+                                  inherit.aes = FALSE,
+                                  color = "#4adbc8",
+                                  size = 1,
+                                  alpha = .6) +
+                          geom_sf(data=barris.df%>%
+                                                filter(Nom_Barri==dis.name)%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                   filter(Nom_Barri==dis.name)%>%
+                                                                   droplevels()%>%
+                                                                   dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                                   by="Nom_Barri"),
+                                  colour = "#636363",alpha=0,size=0.6)+
+                          geom_sf(data=edu_barris%>%
+                                          right_join(vuln.distance.edu.acu.50%>%
+                                                             filter(Nom_Barri==dis.name)%>%
+                                                             dplyr::select(CODI_EQUIPAMENT,MAX_TOTALD_ID)%>%
+                                                             distinct()%>%
+                                                             drop_na(),
+                                                    by="CODI_EQUIPAMENT"),
+                                   alpha=0.8,
+                                   col="black",
+                                   size=3)+
+                          coord_sf(xlim = c(min_x$min_x,max_x$max_x),
+                                    ylim = c(min_y$min_y,max_y$max_y))+
+                          scale_x_continuous(limits = c(min_x$min_x,max_x$max_x))+
+                          scale_y_continuous(limits=c(min_y$min_y,max_y$max_y))+
+                          theme_ipsum_rc(grid=F)+
+                          theme(axis.text.x = element_blank(),
+                                axis.text.y = element_blank(),
+                                axis.title.x =element_blank(),
+                                axis.title.y = element_blank(),
+                                legend.position = "bottom")
+```
+
+#### Sants
+Data:
+
+```{r}
+dis.name <- c("Sants")
+plot.schools.50m <- vuln.distance.edu.acu.50 %>%
+                        filter(Nom_Barri==dis.name)%>%
+                        droplevels()
+dis <- barris.df %>%
+                filter(Nom_Barri == dis.name)
+min_x <- barris.df.2%>%
+                filter(Nom_Barri == dis.name)%>%
+                droplevels()%>%
+                filter(min_x==min(min_x))%>%
+                dplyr::select(min_x)
+min_y <- barris.df.2%>%
+                filter(Nom_Barri == dis.name)%>%
+                droplevels()%>%
+                filter(min_y==min(min_y))%>%
+                dplyr::select(min_y)
+max_x <- barris.df.2%>%
+                filter(Nom_Barri == dis.name)%>%
+                droplevels()%>%
+                filter(max_x==max(max_x))%>%
+                dplyr::select(max_x)
+max_y <- barris.df.2%>%
+                filter(Nom_Barri == dis.name)%>%
+                droplevels()%>%
+                filter(max_y==max(max_y))%>%
+                dplyr::select(max_y)
+```
+
+Total plot:  
+
+```{r fig.width=10}
+dis%>%
+                        ggplot() +
+                          ggtitle(dis.name)+
+                          stat_bin2d(data=acus_latlon.2%>%
+                                                          filter(TOTAL_D=="60 - 65 dB(A)")%>%
+                                                          droplevels()%>%
+                                                          drop_na()%>%
+                                                          distinct()%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                   filter(Nom_Barri==dis.name,
+                                                                          TOTAL_D=="60 - 65 dB(A)")%>%
+                                                                   droplevels()%>%
+                                                                   dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                           by="Nom_Barri"),
+                                         aes(x=X,y=Y),
+                                             fill = "#fef8c3",
+                                         binwidth = c(80,80),alpha=0.6) +
+                          stat_bin2d(data=acus_latlon.2%>%
+                                                          filter(Nom_Barri==dis.name,
+                                                                 TOTAL_D=="65 - 70 dB(A)")%>%
+                                                          droplevels()%>%
+                                                          drop_na()%>%
+                                                          distinct()%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                   filter(Nom_Barri==dis.name,
+                                                                          TOTAL_D=="65 - 70 dB(A)")%>%
+                                                                   droplevels()%>%
+                                                                   dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                           by="Nom_Barri"),
+                                         aes(x=X,y=Y),
+                                         fill="#5ac1ad",
+                                         binwidth = c(80,80),alpha=0.6) +
+                          stat_bin2d(data=acus_latlon.2%>%
+                                                          filter(Nom_Barri==dis.name,
+                                                                 TOTAL_D=="70 - 75 dB(A)")%>%
+                                                          droplevels()%>%
+                                                          drop_na()%>%
+                                                          distinct()%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                   filter(Nom_Barri==dis.name,
+                                                                          TOTAL_D=="70 - 75 dB(A)")%>%
+                                                                   droplevels()%>%
+                                                                   dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                           by="Nom_Barri"),
+                                         aes(x=X,y=Y),
+                                             fill = "#4677a8",
+                                         binwidth = c(80,80),alpha=0.6) +
+                          stat_bin2d(data=acus_latlon.2%>%
+                                                          filter(Nom_Barri==dis.name,
+                                                                 TOTAL_D=="75 - 80 dB(A)")%>%
+                                                          droplevels()%>%
+                                                          drop_na()%>%
+                                                          distinct()%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                             dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                           by="Nom_Barri"),
+                                         aes(x=X,y=Y),
+                                             fill = "#766cb3",
+                                         binwidth = c(80,80),alpha=0.6) +
+                          geom_sf(data = streets$osm_lines,
+                                  col = "#bbb4b6",
+                                  size = .1,
+                                  alpha = .3) +
+                          geom_sf(data = highways$osm_lines,
+                                  col = "#bbb4b6",
+                                  size = .3,
+                                  alpha = .6)+
+                          geom_sf(data = river$osm_lines,
+                                  inherit.aes = FALSE,
+                                  color = "#4adbc8",
+                                  size = 1,
+                                  alpha = .6) +
+                          geom_sf(data=barris.df%>%
+                                                filter(Nom_Barri==dis.name)%>%
+                                                          right_join(vuln.distance.edu.acu.50%>%
+                                                                   filter(Nom_Barri==dis.name)%>%
+                                                                   droplevels()%>%
+                                                                   dplyr::select(Nom_Barri)%>%
+                                                                   distinct(),
+                                                                   by="Nom_Barri"),
+                                  colour = "#636363",alpha=0,size=0.6)+
+                          geom_sf(data=edu_barris%>%
+                                          right_join(vuln.distance.edu.acu.50%>%
+                                                             filter(Nom_Barri==dis.name)%>%
+                                                             dplyr::select(CODI_EQUIPAMENT,MAX_TOTALD_ID)%>%
+                                                             distinct()%>%
+                                                             drop_na(),
+                                                    by="CODI_EQUIPAMENT"),
+                                   alpha=0.8,
+                                   col="black",
+                                   size=3)+
+                          coord_sf(xlim = c(min_x$min_x,max_x$max_x),
+                                    ylim = c(min_y$min_y,max_y$max_y))+
+                          scale_x_continuous(limits = c(min_x$min_x,max_x$max_x))+
+                          scale_y_continuous(limits=c(min_y$min_y,max_y$max_y))+
+                          theme_ipsum_rc(grid=F)+
+                          theme(axis.text.x = element_blank(),
+                                axis.text.y = element_blank(),
+                                axis.title.x =element_blank(),
+                                axis.title.y = element_blank(),
+                                legend.position = "bottom")
+```
+
+That's all! After generating the figures I have used `Illustrator CC 2018` to generate the infographic.  
