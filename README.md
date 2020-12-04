@@ -14,6 +14,6 @@ You can download the infographics in [English](https://www.dropbox.com/s/8invviz
 Here's a short video in Spanish I prepared for the final, explaining how I made the infographics and what it is about:
 [![](misc/WDVC2020_thumbnail_youtube.png)](https://www.youtube.com/watch?v=HCcssTnf7Gk)
 
-Have a look ;)
+Have a look at the english version of the infographics below ;)
 
 ![](ENG_MartaRoyoLlonch_WDVC2020_BCN_KOBE.png)
